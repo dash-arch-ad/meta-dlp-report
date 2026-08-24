@@ -19,15 +19,15 @@ JST = ZoneInfo("Asia/Tokyo")
 
 WORKSHEET_NAME = "gitreport"
 
-# Metaの購入アクション
 PURCHASE_ACTION_TYPE = "offsite_conversion.fb_pixel_purchase"
 
-# 時間帯は広告アカウントのタイムゾーンを使用
 HOURLY_BREAKDOWN = "hourly_stats_aggregated_by_advertiser_time_zone"
 
-# API再試行
 MAX_RETRIES = 5
 RETRY_BASE_SECONDS = 2
+
+# 通常は7日単位で取得
+DEFAULT_CHUNK_DAYS = 7
 
 
 # ============================================================
@@ -38,12 +38,17 @@ def main():
     print("=== Start Meta Hourly Purchase Export ===")
 
     config = load_secret()
+
     resolved = resolve_config(config)
+
     validate_config(resolved)
 
     since, until = get_target_date_range()
 
-    print(f"Target range: {since:%Y-%m-%d} to {until:%Y-%m-%d}")
+    print(
+        f"Target range: "
+        f"{since:%Y-%m-%d} to {until:%Y-%m-%d}"
+    )
 
     meta_data = fetch_meta_hourly_purchase(
         act_id=resolved["meta"]["account_id"],
@@ -52,13 +57,19 @@ def main():
         until=until,
     )
 
+    print(
+        f"Meta API rows fetched: {len(meta_data)}"
+    )
+
     rows = build_output_rows(
         api_rows=meta_data,
         since=since,
         until=until,
     )
 
-    print(f"Output rows: {len(rows)}")
+    print(
+        f"Output rows built: {len(rows)}"
+    )
 
     spreadsheet = connect_spreadsheet(
         sheet_id=resolved["sheet"]["spreadsheet_id"],
@@ -78,13 +89,19 @@ def main():
 # ============================================================
 
 def load_secret():
-    secret_env = os.environ.get("APP_SECRET_JSON")
+    secret_env = os.environ.get(
+        "APP_SECRET_JSON"
+    )
 
     if not secret_env:
-        raise RuntimeError("APP_SECRET_JSON is not set")
+        raise RuntimeError(
+            "APP_SECRET_JSON is not set"
+        )
 
     try:
-        return json.loads(secret_env)
+        return json.loads(
+            secret_env
+        )
 
     except json.JSONDecodeError as e:
         raise RuntimeError(
@@ -93,31 +110,58 @@ def load_secret():
 
 
 def resolve_config(config):
-    meta_conf = config.get("meta", {})
-    sheets_conf = config.get("sheets", {})
+    meta_conf = config.get(
+        "meta",
+        {},
+    )
 
-    google_service_account = normalize_google_service_account(
-        config.get("gcp_service_account")
+    sheets_conf = config.get(
+        "sheets",
+        {},
+    )
+
+    google_service_account = (
+        normalize_google_service_account(
+            config.get(
+                "gcp_service_account"
+            )
+        )
     )
 
     return {
         "meta": {
-            "token": meta_conf.get("token"),
-            "account_id": meta_conf.get("account_id"),
+            "token": meta_conf.get(
+                "token"
+            ),
+            "account_id": meta_conf.get(
+                "account_id"
+            ),
         },
         "sheet": {
-            "spreadsheet_id": sheets_conf.get("spreadsheet_id"),
-            "google_service_account": google_service_account,
+            "spreadsheet_id": sheets_conf.get(
+                "spreadsheet_id"
+            ),
+            "google_service_account": (
+                google_service_account
+            ),
         },
     }
 
 
 def validate_config(resolved):
     required = {
-        "meta.token": resolved["meta"]["token"],
-        "meta.account_id": resolved["meta"]["account_id"],
-        "sheets.spreadsheet_id": resolved["sheet"]["spreadsheet_id"],
-        "gcp_service_account": resolved["sheet"]["google_service_account"],
+        "meta.token": (
+            resolved["meta"]["token"]
+        ),
+        "meta.account_id": (
+            resolved["meta"]["account_id"]
+        ),
+        "sheets.spreadsheet_id": (
+            resolved["sheet"]["spreadsheet_id"]
+        ),
+        "gcp_service_account": (
+            resolved["sheet"]["google_service_account"]
+        ),
     }
 
     missing = [
@@ -128,33 +172,60 @@ def validate_config(resolved):
 
     if missing:
         raise RuntimeError(
-            f"Missing required config keys: {', '.join(missing)}"
+            "Missing required config keys: "
+            + ", ".join(missing)
         )
 
 
-def normalize_google_service_account(creds):
+def normalize_google_service_account(
+    creds
+):
     if not creds:
         return None
 
-    fixed = dict(creds)
+    fixed = dict(
+        creds
+    )
 
-    private_key = fixed.get("private_key", "")
+    private_key = fixed.get(
+        "private_key",
+        "",
+    )
 
     if private_key:
-        fixed["private_key"] = private_key.replace("\\n", "\n")
+        fixed["private_key"] = (
+            private_key.replace(
+                "\\n",
+                "\n",
+            )
+        )
 
     return fixed
 
 
 # ============================================================
-# Date range
+# Date
 # ============================================================
 
-def add_months(base_date, months):
-    month = base_date.month - 1 + months
+def add_months(
+    base_date,
+    months,
+):
+    month = (
+        base_date.month
+        - 1
+        + months
+    )
 
-    year = base_date.year + month // 12
-    month = month % 12 + 1
+    year = (
+        base_date.year
+        + month // 12
+    )
+
+    month = (
+        month % 12
+        + 1
+    )
 
     return date(
         year,
@@ -165,26 +236,24 @@ def add_months(base_date, months):
 
 def get_target_date_range():
     """
-    実行日を基準に、
-
-    当月
-    前月
-    前々月
-
-    の3ヶ月を取得。
+    当月を含む過去3ヶ月。
 
     当日は含めず、前日まで。
 
     例：
     実行日 2026-08-24
 
-    since = 2026-06-01
-    until = 2026-08-23
+    2026-06-01 ～ 2026-08-23
     """
 
-    today_jst = datetime.now(JST).date()
+    today_jst = (
+        datetime.now(JST).date()
+    )
 
-    yesterday = today_jst - timedelta(days=1)
+    yesterday = (
+        today_jst
+        - timedelta(days=1)
+    )
 
     this_month_start = date(
         today_jst.year,
@@ -192,7 +261,6 @@ def get_target_date_range():
         1,
     )
 
-    # 当月を含む過去3ヶ月
     since = add_months(
         this_month_start,
         -2,
@@ -200,25 +268,69 @@ def get_target_date_range():
 
     until = yesterday
 
-    # 月初1日に実行した場合、
-    # yesterdayは前月なので問題なく取得可能
     return since, until
 
 
+def split_date_ranges(
+    since,
+    until,
+    max_days,
+):
+    ranges = []
+
+    current_since = since
+
+    while current_since <= until:
+        current_until = min(
+            current_since
+            + timedelta(
+                days=max_days - 1
+            ),
+            until,
+        )
+
+        ranges.append(
+            (
+                current_since,
+                current_until,
+            )
+        )
+
+        current_since = (
+            current_until
+            + timedelta(days=1)
+        )
+
+    return ranges
+
+
 # ============================================================
-# Meta API
+# Meta
 # ============================================================
 
-def normalize_meta_act_id(raw_act_id):
+def normalize_meta_act_id(
+    raw_act_id
+):
     cleaned = (
         str(raw_act_id)
-        .replace("act=", "")
-        .replace("act_", "")
-        .replace("act", "")
+        .replace(
+            "act=",
+            "",
+        )
+        .replace(
+            "act_",
+            "",
+        )
+        .replace(
+            "act",
+            "",
+        )
         .strip()
     )
 
-    return f"act_{cleaned}"
+    return (
+        f"act_{cleaned}"
+    )
 
 
 def fetch_meta_hourly_purchase(
@@ -228,56 +340,165 @@ def fetch_meta_hourly_purchase(
     until,
 ):
     """
-    日付 × 時間帯ごとの購入CVを取得。
+    過去3ヶ月を7日単位で分割取得。
 
-    attribution:
-    - 1d_view
-    - 7d_click
+    7日取得でMeta APIが
+    "reduce the amount of data"
+    を返した場合は
+    1日単位へ自動フォールバック。
     """
 
-    normalized_act_id = normalize_meta_act_id(act_id)
+    normalized_act_id = (
+        normalize_meta_act_id(
+            act_id
+        )
+    )
+
+    ranges = split_date_ranges(
+        since=since,
+        until=until,
+        max_days=DEFAULT_CHUNK_DAYS,
+    )
+
+    all_rows = []
+
+    total_ranges = len(
+        ranges
+    )
+
+    for index, (
+        chunk_since,
+        chunk_until,
+    ) in enumerate(
+        ranges,
+        start=1,
+    ):
+
+        print(
+            f"Fetching Meta hourly data "
+            f"{index}/{total_ranges}: "
+            f"{chunk_since:%Y-%m-%d} to "
+            f"{chunk_until:%Y-%m-%d}"
+        )
+
+        try:
+            batch = (
+                fetch_meta_hourly_purchase_chunk(
+                    act_id=normalized_act_id,
+                    token=token,
+                    since=chunk_since,
+                    until=chunk_until,
+                )
+            )
+
+            all_rows.extend(
+                batch
+            )
+
+        except MetaDataTooLargeError:
+            print(
+                "Chunk too large. "
+                "Falling back to daily requests: "
+                f"{chunk_since:%Y-%m-%d} to "
+                f"{chunk_until:%Y-%m-%d}"
+            )
+
+            daily_ranges = split_date_ranges(
+                since=chunk_since,
+                until=chunk_until,
+                max_days=1,
+            )
+
+            for (
+                daily_since,
+                daily_until,
+            ) in daily_ranges:
+
+                print(
+                    "Fetching fallback daily data: "
+                    f"{daily_since:%Y-%m-%d}"
+                )
+
+                daily_batch = (
+                    fetch_meta_hourly_purchase_chunk(
+                        act_id=normalized_act_id,
+                        token=token,
+                        since=daily_since,
+                        until=daily_until,
+                    )
+                )
+
+                all_rows.extend(
+                    daily_batch
+                )
+
+    return all_rows
+
+
+class MetaDataTooLargeError(
+    RuntimeError
+):
+    pass
+
+
+def fetch_meta_hourly_purchase_chunk(
+    act_id,
+    token,
+    since,
+    until,
+):
+    """
+    指定期間の
+
+    日付 × 時間帯 × 購入CV
+
+    を取得。
+    """
 
     url = (
         f"https://graph.facebook.com/"
         f"{META_API_VERSION}/"
-        f"{normalized_act_id}/insights"
+        f"{act_id}/insights"
     )
 
     params = {
         "access_token": token,
 
-        # アカウント全体で集計
         "level": "account",
 
         "time_range": json.dumps({
-            "since": since.strftime("%Y-%m-%d"),
-            "until": until.strftime("%Y-%m-%d"),
+            "since": (
+                since.strftime(
+                    "%Y-%m-%d"
+                )
+            ),
+            "until": (
+                until.strftime(
+                    "%Y-%m-%d"
+                )
+            ),
         }),
 
-        # 日単位 × 時間帯
+        # 日別 × 時間帯
         "time_increment": "1",
 
-        # 広告アカウントのタイムゾーン
+        # 広告アカウントの
+        # タイムゾーン基準
         "breakdowns": json.dumps([
             HOURLY_BREAKDOWN
         ]),
 
-        # actionsをaction_type単位で取得
-        "action_breakdowns": json.dumps([
-            "action_type"
-        ]),
+        # 欲しいアトリビューションのみ
+        "action_attribution_windows": (
+            json.dumps([
+                "1d_view",
+                "7d_click",
+            ])
+        ),
 
-        # 必要なアトリビューションのみ指定
-        "action_attribution_windows": json.dumps([
-            "1d_view",
-            "7d_click",
-        ]),
-
-        "fields": ",".join([
-            "date_start",
-            "date_stop",
-            "actions",
-        ]),
+        # actions内から
+        # purchaseだけ抽出する
+        "fields": "actions",
 
         "limit": 5000,
     }
@@ -285,26 +506,34 @@ def fetch_meta_hourly_purchase(
     all_rows = []
 
     while True:
-
         data = meta_request_with_retry(
             url=url,
             params=params,
         )
 
-        batch = data.get("data", [])
+        batch = data.get(
+            "data",
+            [],
+        )
 
-        all_rows.extend(batch)
+        all_rows.extend(
+            batch
+        )
 
         next_url = (
             data
-            .get("paging", {})
-            .get("next")
+            .get(
+                "paging",
+                {},
+            )
+            .get(
+                "next"
+            )
         )
 
         if not next_url:
             break
 
-        # paging.nextには必要なパラメータがすべて含まれる
         url = next_url
         params = None
 
@@ -315,15 +544,12 @@ def meta_request_with_retry(
     url,
     params=None,
 ):
-    """
-    Meta APIの一時的な
-    429 / 5xx / code 1 / code 2
-    などに対応。
-    """
-
     last_error = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
 
         try:
             response = requests.get(
@@ -338,44 +564,95 @@ def meta_request_with_retry(
             if attempt == MAX_RETRIES:
                 break
 
-            sleep_seconds = RETRY_BASE_SECONDS ** attempt
-
-            print(
-                f"Meta request retry "
-                f"{attempt}/{MAX_RETRIES}"
+            sleep_seconds = (
+                RETRY_BASE_SECONDS
+                ** attempt
             )
 
-            time.sleep(sleep_seconds)
+            print(
+                "Meta request connection error. "
+                f"Retry {attempt}/{MAX_RETRIES}"
+            )
+
+            time.sleep(
+                sleep_seconds
+            )
+
             continue
 
         try:
-            payload = response.json()
+            payload = (
+                response.json()
+            )
 
         except ValueError:
             payload = {}
 
-        if response.ok and "error" not in payload:
+        if (
+            response.ok
+            and "error" not in payload
+        ):
             return payload
 
-        error = payload.get("error", {})
+        error = payload.get(
+            "error",
+            {},
+        )
 
-        error_code = error.get("code")
-        error_subcode = error.get("error_subcode")
-        error_message = error.get("message", "")
+        error_code = error.get(
+            "code"
+        )
+
+        error_subcode = error.get(
+            "error_subcode"
+        )
+
+        error_message = error.get(
+            "message",
+            "",
+        )
+
+        # ------------------------------------------
+        # データ量過多
+        # ------------------------------------------
+
+        message_lower = (
+            str(error_message).lower()
+        )
+
+        if (
+            error_code == 1
+            and (
+                "reduce the amount of data"
+                in message_lower
+            )
+        ):
+            raise MetaDataTooLargeError(
+                "Meta API requested too much data. "
+                f"status={response.status_code}, "
+                f"code={error_code}, "
+                f"subcode={error_subcode}"
+            )
+
+        # ------------------------------------------
+        # 一時的なAPIエラー
+        # ------------------------------------------
 
         retryable_status = (
             response.status_code == 429
             or response.status_code >= 500
         )
 
-        retryable_meta_code = error_code in {
-            1,
-            2,
-            4,
-            17,
-            32,
-            613,
-        }
+        retryable_meta_code = (
+            error_code in {
+                1,
+                2,
+                4,
+                17,
+                32,
+                613,
+            }
+        )
 
         if (
             attempt < MAX_RETRIES
@@ -384,19 +661,26 @@ def meta_request_with_retry(
                 or retryable_meta_code
             )
         ):
-            sleep_seconds = RETRY_BASE_SECONDS ** attempt
+            sleep_seconds = (
+                RETRY_BASE_SECONDS
+                ** attempt
+            )
 
             print(
-                f"Meta temporary error. "
+                "Meta temporary error. "
                 f"Retry {attempt}/{MAX_RETRIES}. "
                 f"status={response.status_code}, "
                 f"code={error_code}, "
                 f"subcode={error_subcode}"
             )
 
-            time.sleep(sleep_seconds)
+            time.sleep(
+                sleep_seconds
+            )
+
             continue
 
+        # tokenなどはログへ出さない
         raise RuntimeError(
             "Meta API request failed. "
             f"status={response.status_code}, "
@@ -406,61 +690,84 @@ def meta_request_with_retry(
         )
 
     raise RuntimeError(
-        f"Meta API request failed after {MAX_RETRIES} retries: "
-        f"{type(last_error).__name__}"
+        "Meta API request failed after "
+        f"{MAX_RETRIES} retries. "
+        f"error={type(last_error).__name__}"
     )
 
 
 # ============================================================
-# Actions
+# Purchase Attribution
 # ============================================================
 
-def extract_purchase_attribution(actions):
+def extract_purchase_attribution(
+    actions
+):
     """
-    Meta actions例：
+    actionsから
 
-    [
-        {
-            "action_type":
-                "offsite_conversion.fb_pixel_purchase",
-            "value": "10",
-            "1d_view": "2",
-            "7d_click": "8"
-        }
-    ]
+    offsite_conversion.fb_pixel_purchase
 
-    ↓
+    の
 
-    (2, 8)
+    1d_view
+    7d_click
+
+    を抽出。
     """
 
     view_1d = 0
     click_7d = 0
 
-    if not isinstance(actions, list):
-        return view_1d, click_7d
+    if not isinstance(
+        actions,
+        list,
+    ):
+        return (
+            view_1d,
+            click_7d,
+        )
 
     for action in actions:
 
-        if not isinstance(action, dict):
+        if not isinstance(
+            action,
+            dict,
+        ):
             continue
 
-        if action.get("action_type") != PURCHASE_ACTION_TYPE:
+        action_type = (
+            action.get(
+                "action_type"
+            )
+        )
+
+        if (
+            action_type
+            != PURCHASE_ACTION_TYPE
+        ):
             continue
 
         view_1d += to_number(
-            action.get("1d_view")
+            action.get(
+                "1d_view"
+            )
         )
 
         click_7d += to_number(
-            action.get("7d_click")
+            action.get(
+                "7d_click"
+            )
         )
 
-    return view_1d, click_7d
+    return (
+        view_1d,
+        click_7d,
+    )
 
 
 # ============================================================
-# Output
+# Output rows
 # ============================================================
 
 def build_output_rows(
@@ -469,45 +776,66 @@ def build_output_rows(
     until,
 ):
     """
-    すべての日付 × 24時間を作成して、
-    Meta APIのCV値を反映。
+    出力：
 
-    CVなしの時間帯は0。
+    A Media
+    B scope
+    C Month
+    D time
+    E purchase_1d_view
+    F purchase_7d_click
+
+    CVがない時間帯も0で出力。
     """
 
     hourly_data = {}
 
-    # --------------------------------------------------------
-    # まず全期間 × 24時間を0で作成
-    # --------------------------------------------------------
+    # ------------------------------------------
+    # 全日付 × 24時間を作成
+    # ------------------------------------------
 
     current_date = since
 
     while current_date <= until:
 
-        date_text = current_date.strftime("%Y-%m-%d")
+        date_text = (
+            current_date.strftime(
+                "%Y-%m-%d"
+            )
+        )
 
-        for hour in range(24):
+        for hour in range(
+            24
+        ):
 
-            hour_text = f"{hour:02d}:00"
+            hour_text = (
+                f"{hour:02d}:00"
+            )
 
             hourly_data[
-                (date_text, hour_text)
+                (
+                    date_text,
+                    hour_text,
+                )
             ] = {
                 "view_1d": 0,
                 "click_7d": 0,
             }
 
-        current_date += timedelta(days=1)
+        current_date += (
+            timedelta(days=1)
+        )
 
-    # --------------------------------------------------------
-    # Metaデータ反映
-    # --------------------------------------------------------
+    # ------------------------------------------
+    # Meta API値を反映
+    # ------------------------------------------
 
     for item in api_rows:
 
         date_text = normalize_date(
-            item.get("date_start")
+            item.get(
+                "date_start"
+            )
         )
 
         raw_hour = item.get(
@@ -519,12 +847,19 @@ def build_output_rows(
             raw_hour
         )
 
-        if not date_text or not hour_text:
+        if (
+            not date_text
+            or not hour_text
+        ):
             continue
 
-        view_1d, click_7d = (
-            extract_purchase_attribution(
-                item.get("actions", [])
+        (
+            view_1d,
+            click_7d,
+        ) = extract_purchase_attribution(
+            item.get(
+                "actions",
+                [],
             )
         )
 
@@ -534,17 +869,28 @@ def build_output_rows(
         )
 
         if key not in hourly_data:
-            hourly_data[key] = {
+            hourly_data[
+                key
+            ] = {
                 "view_1d": 0,
                 "click_7d": 0,
             }
 
-        hourly_data[key]["view_1d"] += view_1d
-        hourly_data[key]["click_7d"] += click_7d
+        hourly_data[
+            key
+        ]["view_1d"] += (
+            view_1d
+        )
 
-    # --------------------------------------------------------
-    # Sheet rows
-    # --------------------------------------------------------
+        hourly_data[
+            key
+        ]["click_7d"] += (
+            click_7d
+        )
+
+    # ------------------------------------------
+    # Sheet用
+    # ------------------------------------------
 
     rows = []
 
@@ -561,26 +907,36 @@ def build_output_rows(
             date_text,
             hour_text,
             normalize_number_for_sheet(
-                metrics["view_1d"]
+                metrics[
+                    "view_1d"
+                ]
             ),
             normalize_number_for_sheet(
-                metrics["click_7d"]
+                metrics[
+                    "click_7d"
+                ]
             ),
         ])
 
     return rows
 
 
-def normalize_date(value):
+def normalize_date(
+    value
+):
     if not value:
         return ""
 
-    return str(value)[:10]
+    return str(
+        value
+    )[:10]
 
 
-def normalize_hour(value):
+def normalize_hour(
+    value
+):
     """
-    Meta API:
+    Meta API：
 
     00:00:00 - 00:59:59
 
@@ -592,9 +948,15 @@ def normalize_hour(value):
     if not value:
         return ""
 
-    value = str(value).strip()
+    value = str(
+        value
+    ).strip()
 
-    start = value.split("-")[0].strip()
+    start = (
+        value
+        .split("-")[0]
+        .strip()
+    )
 
     if len(start) >= 5:
         return start[:5]
@@ -612,8 +974,14 @@ def connect_spreadsheet(
 ):
     try:
         scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive",
+            (
+                "https://spreadsheets."
+                "google.com/feeds"
+            ),
+            (
+                "https://www.googleapis.com/"
+                "auth/drive"
+            ),
         ]
 
         creds = (
@@ -624,10 +992,14 @@ def connect_spreadsheet(
             )
         )
 
-        client = gspread.authorize(creds)
+        client = gspread.authorize(
+            creds
+        )
 
-        spreadsheet = client.open_by_key(
-            sheet_id
+        spreadsheet = (
+            client.open_by_key(
+                sheet_id
+            )
         )
 
         print(
@@ -638,7 +1010,7 @@ def connect_spreadsheet(
 
     except Exception as e:
         raise RuntimeError(
-            f"Google Sheets connection error: "
+            "Google Sheets connection error: "
             f"{type(e).__name__}"
         ) from e
 
@@ -658,8 +1030,10 @@ def write_to_sheet(
 
     try:
         try:
-            worksheet = spreadsheet.worksheet(
-                WORKSHEET_NAME
+            worksheet = (
+                spreadsheet.worksheet(
+                    WORKSHEET_NAME
+                )
             )
 
         except gspread.WorksheetNotFound:
@@ -671,18 +1045,26 @@ def write_to_sheet(
                 )
             )
 
-        worksheet.clear()
+        output = (
+            header
+            + rows
+        )
 
-        output = header + rows
+        required_rows = len(
+            output
+        )
 
-        # 必要行数・列数を確保
-        required_rows = len(output)
-
-        if worksheet.row_count < required_rows:
+        if (
+            worksheet.row_count
+            < required_rows
+        ):
             worksheet.resize(
                 rows=required_rows,
                 cols=6,
             )
+
+        # 既存値を消してから更新
+        worksheet.clear()
 
         worksheet.update(
             range_name="A1",
@@ -690,9 +1072,16 @@ def write_to_sheet(
             value_input_option="RAW",
         )
 
+        print(
+            f"Sheet updated: "
+            f"{WORKSHEET_NAME}, "
+            f"{len(rows)} rows"
+        )
+
     except Exception as e:
         raise RuntimeError(
-            f"Write error ({WORKSHEET_NAME}): "
+            f"Write error "
+            f"({WORKSHEET_NAME}): "
             f"{type(e).__name__}"
         ) from e
 
@@ -701,7 +1090,9 @@ def write_to_sheet(
 # Utils
 # ============================================================
 
-def to_number(value):
+def to_number(
+    value
+):
     if value in (
         None,
         "",
@@ -709,7 +1100,9 @@ def to_number(value):
         return 0
 
     try:
-        return float(value)
+        return float(
+            value
+        )
 
     except (
         TypeError,
@@ -718,16 +1111,26 @@ def to_number(value):
         return 0
 
 
-def normalize_number_for_sheet(value):
-    """
-    2.0 → 2
-    2.5 → 2.5
-    """
+def normalize_number_for_sheet(
+    value
+):
+    try:
+        numeric = float(
+            value
+        )
 
-    if float(value).is_integer():
-        return int(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return 0
 
-    return value
+    if numeric.is_integer():
+        return int(
+            numeric
+        )
+
+    return numeric
 
 
 # ============================================================

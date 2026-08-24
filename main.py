@@ -333,6 +333,12 @@ def normalize_meta_act_id(
     )
 
 
+class MetaDataTooLargeError(
+    RuntimeError
+):
+    pass
+
+
 def fetch_meta_hourly_purchase(
     act_id,
     token,
@@ -435,12 +441,6 @@ def fetch_meta_hourly_purchase(
     return all_rows
 
 
-class MetaDataTooLargeError(
-    RuntimeError
-):
-    pass
-
-
 def fetch_meta_hourly_purchase_chunk(
     act_id,
     token,
@@ -482,13 +482,12 @@ def fetch_meta_hourly_purchase_chunk(
         # 日別 × 時間帯
         "time_increment": "1",
 
-        # 広告アカウントの
-        # タイムゾーン基準
+        # 広告アカウントのタイムゾーン基準
         "breakdowns": json.dumps([
             HOURLY_BREAKDOWN
         ]),
 
-        # 欲しいアトリビューションのみ
+        # 表示1日・クリック7日
         "action_attribution_windows": (
             json.dumps([
                 "1d_view",
@@ -496,8 +495,7 @@ def fetch_meta_hourly_purchase_chunk(
             ])
         ),
 
-        # actions内から
-        # purchaseだけ抽出する
+        # actions内から購入のみ抽出
         "fields": "actions",
 
         "limit": 5000,
@@ -680,7 +678,7 @@ def meta_request_with_retry(
 
             continue
 
-        # tokenなどはログへ出さない
+        # Secretやtokenはログへ出さない
         raise RuntimeError(
             "Meta API request failed. "
             f"status={response.status_code}, "
@@ -785,6 +783,8 @@ def build_output_rows(
     E purchase_1d_view
     F purchase_7d_click
 
+    D列のtimeは整数値 0～23。
+
     CVがない時間帯も0で出力。
     """
 
@@ -804,18 +804,13 @@ def build_output_rows(
             )
         )
 
-        for hour in range(
-            24
-        ):
+        for hour in range(24):
 
-            hour_text = (
-                f"{hour:02d}:00"
-            )
-
+            # hourは文字列ではなくint
             hourly_data[
                 (
                     date_text,
-                    hour_text,
+                    hour,
                 )
             ] = {
                 "view_1d": 0,
@@ -843,13 +838,13 @@ def build_output_rows(
             "",
         )
 
-        hour_text = normalize_hour(
+        hour = normalize_hour(
             raw_hour
         )
 
         if (
             not date_text
-            or not hour_text
+            or hour is None
         ):
             continue
 
@@ -865,7 +860,7 @@ def build_output_rows(
 
         key = (
             date_text,
-            hour_text,
+            hour,
         )
 
         if key not in hourly_data:
@@ -896,7 +891,7 @@ def build_output_rows(
 
     for (
         date_text,
-        hour_text,
+        hour,
     ), metrics in sorted(
         hourly_data.items()
     ):
@@ -905,12 +900,16 @@ def build_output_rows(
             "meta",
             "time",
             date_text,
-            hour_text,
+
+            # intのままGoogle Sheetsへ渡す
+            hour,
+
             normalize_number_for_sheet(
                 metrics[
                     "view_1d"
                 ]
             ),
+
             normalize_number_for_sheet(
                 metrics[
                     "click_7d"
@@ -938,15 +937,17 @@ def normalize_hour(
     """
     Meta API：
 
-    00:00:00 - 00:59:59
+    00:00:00 - 00:59:59 → 0
+    01:00:00 - 01:59:59 → 1
+    02:00:00 - 02:59:59 → 2
+    ...
+    23:00:00 - 23:59:59 → 23
 
-    ↓
-
-    00:00
+    intとして返す。
     """
 
     if not value:
-        return ""
+        return None
 
     value = str(
         value
@@ -958,10 +959,22 @@ def normalize_hour(
         .strip()
     )
 
-    if len(start) >= 5:
-        return start[:5]
+    try:
+        hour = int(
+            start.split(":")[0]
+        )
 
-    return ""
+    except (
+        ValueError,
+        IndexError,
+    ):
+        return None
+
+    # 念のため0～23のみ許可
+    if 0 <= hour <= 23:
+        return hour
+
+    return None
 
 
 # ============================================================
@@ -1063,9 +1076,11 @@ def write_to_sheet(
                 cols=6,
             )
 
-        # 既存値を消してから更新
+        # 既存値を削除
         worksheet.clear()
 
+        # RAWで書き込むことで
+        # D列の0～23を数値として保持
         worksheet.update(
             range_name="A1",
             values=output,

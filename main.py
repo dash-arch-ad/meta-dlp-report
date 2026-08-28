@@ -42,9 +42,6 @@ HEADERS = [
 ]
 
 
-# 購入系action_type
-# 同じ行に複数存在する場合の二重計上を避けるため、
-# 上から優先して1種類だけ採用する
 PURCHASE_ACTION_TYPES = [
     "offsite_conversion.fb_pixel_purchase",
     "purchase",
@@ -57,18 +54,18 @@ PURCHASE_ACTION_TYPES = [
 # ==========================================
 
 def load_config():
-    raw = os.environ.get("REPORT_CONFIG_JSON")
+    raw = os.environ.get("APP_SECRET_JSON")
 
     if not raw:
         raise RuntimeError(
-            "GitHub Secrets の REPORT_CONFIG_JSON が設定されていません。"
+            "GitHub Secrets の APP_SECRET_JSON が設定されていません。"
         )
 
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
         raise RuntimeError(
-            f"REPORT_CONFIG_JSON のJSON形式が正しくありません: {e}"
+            f"APP_SECRET_JSON のJSON形式が正しくありません: {e}"
         )
 
 
@@ -81,16 +78,13 @@ def get_report_period():
         ZoneInfo(REPORT_TIMEZONE)
     ).date()
 
-    # 案件開始前
     if today <= FIXED_START_DATE:
         return None, None
 
-    # 案件期間中
     if FIXED_START_DATE < today <= FIXED_END_DATE:
         until = today - timedelta(days=1)
         return FIXED_START_DATE, until
 
-    # 案件終了後
     return FIXED_START_DATE, FIXED_END_DATE
 
 
@@ -125,7 +119,6 @@ def meta_get_all(url, params):
             )
 
         payload = response.json()
-
         rows.extend(payload.get("data", []))
 
         url = (
@@ -134,8 +127,6 @@ def meta_get_all(url, params):
             .get("next")
         )
 
-        # paging.next にパラメータが含まれるため
-        # 2ページ目以降はparams不要
         params = None
 
     return rows
@@ -252,12 +243,6 @@ def translate_gender(value):
 
 
 def parse_hour(value):
-    """
-    Meta APIの
-    00:00:00 - 00:59:59
-    のような値から0～23を取得
-    """
-
     if value is None:
         return ""
 
@@ -295,10 +280,6 @@ def first_day_of_month(date_string):
 
 
 def spreadsheet_date_serial(d):
-    """
-    Google Sheetsの日付型として書き込むためのシリアル値
-    """
-
     if not d:
         return ""
 
@@ -769,7 +750,6 @@ def write_sheet(
         value_input_option="RAW",
     )
 
-    # month / day をGoogle Sheetsの日付型表示
     worksheet.format(
         "C:D",
         {
@@ -780,7 +760,6 @@ def write_sheet(
         }
     )
 
-    # hourは整数表示
     worksheet.format(
         "E:E",
         {

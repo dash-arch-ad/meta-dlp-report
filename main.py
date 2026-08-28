@@ -22,8 +22,8 @@ MEDIA_NAME = "Meta"
 
 REPORT_TIMEZONE = "Asia/Tokyo"
 
-FIXED_START_DATE = date(2026, 6, 1)
-FIXED_END_DATE = date(2026, 8, 31)
+FIXED_START_DATE = date(2026, 9, 1)
+FIXED_END_DATE = date(2026, 11, 30)
 
 HEADERS = [
     "media",
@@ -63,6 +63,7 @@ def load_config():
 
     try:
         return json.loads(raw)
+
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"APP_SECRET_JSON のJSON形式が正しくありません: {e}"
@@ -78,13 +79,18 @@ def get_report_period():
         ZoneInfo(REPORT_TIMEZONE)
     ).date()
 
+    # 案件開始日以前は取得しない
     if today <= FIXED_START_DATE:
         return None, None
 
+    # 2026/9/2 ～ 2026/11/30 の間は
+    # 9/1 ～ 起動日前日まで取得
     if FIXED_START_DATE < today <= FIXED_END_DATE:
         until = today - timedelta(days=1)
+
         return FIXED_START_DATE, until
 
+    # 2026/12/1以降は全期間取得
     return FIXED_START_DATE, FIXED_END_DATE
 
 
@@ -119,7 +125,10 @@ def meta_get_all(url, params):
             )
 
         payload = response.json()
-        rows.extend(payload.get("data", []))
+
+        rows.extend(
+            payload.get("data", [])
+        )
 
         url = (
             payload
@@ -142,7 +151,9 @@ def fetch_insights(
     breakdowns=None,
     time_increment=None,
 ):
-    account_id = normalize_account_id(account_id)
+    account_id = normalize_account_id(
+        account_id
+    )
 
     url = (
         f"{GRAPH_API_BASE}/"
@@ -166,12 +177,17 @@ def fetch_insights(
     }
 
     if breakdowns:
-        params["breakdowns"] = ",".join(breakdowns)
+        params["breakdowns"] = ",".join(
+            breakdowns
+        )
 
     if time_increment is not None:
         params["time_increment"] = time_increment
 
-    return meta_get_all(url, params)
+    return meta_get_all(
+        url,
+        params
+    )
 
 
 # ==========================================
@@ -208,18 +224,26 @@ def get_purchase_cv(actions):
 
     for action_type in PURCHASE_ACTION_TYPES:
         if action_type in action_map:
-            selected = action_map[action_type]
+            selected = action_map[
+                action_type
+            ]
             break
 
     if selected is None:
         return 0, 0
 
     view_1d = to_number(
-        selected.get("1d_view", 0)
+        selected.get(
+            "1d_view",
+            0
+        )
     )
 
     click_7d = to_number(
-        selected.get("7d_click", 0)
+        selected.get(
+            "7d_click",
+            0
+        )
     )
 
     return view_1d, click_7d
@@ -254,13 +278,16 @@ def parse_hour(value):
     )
 
     if match:
-        return int(match.group(1))
+        return int(
+            match.group(1)
+        )
 
     try:
         hour = int(text)
 
         if 0 <= hour <= 23:
             return hour
+
     except ValueError:
         pass
 
@@ -270,7 +297,9 @@ def parse_hour(value):
 
 
 def first_day_of_month(date_string):
-    d = date.fromisoformat(date_string)
+    d = date.fromisoformat(
+        date_string
+    )
 
     return date(
         d.year,
@@ -283,9 +312,15 @@ def spreadsheet_date_serial(d):
     if not d:
         return ""
 
-    base = date(1899, 12, 30)
+    base = date(
+        1899,
+        12,
+        30
+    )
 
-    return (d - base).days
+    return (
+        d - base
+    ).days
 
 
 # ==========================================
@@ -329,7 +364,7 @@ def row_to_list(row):
 
 
 # ==========================================
-# scope別取得
+# campaign_month
 # ==========================================
 
 def build_campaign_month(
@@ -358,7 +393,9 @@ def build_campaign_month(
             item.get("actions")
         )
 
-        row = base_row("campaign_month")
+        row = base_row(
+            "campaign_month"
+        )
 
         month_date = first_day_of_month(
             item["date_start"]
@@ -367,10 +404,12 @@ def build_campaign_month(
         row["month"] = spreadsheet_date_serial(
             month_date
         )
+
         row["campaign_name"] = item.get(
             "campaign_name",
             ""
         )
+
         row["cv_view_1d"] = cv_view
         row["cv_click_7d"] = cv_click
 
@@ -380,6 +419,10 @@ def build_campaign_month(
 
     return result
 
+
+# ==========================================
+# campaign_day
+# ==========================================
 
 def build_campaign_day(
     token,
@@ -407,7 +450,9 @@ def build_campaign_day(
             item.get("actions")
         )
 
-        row = base_row("campaign_day")
+        row = base_row(
+            "campaign_day"
+        )
 
         day_date = date.fromisoformat(
             item["date_start"]
@@ -440,6 +485,10 @@ def build_campaign_day(
     return result
 
 
+# ==========================================
+# hour
+# ==========================================
+
 def build_hour(
     token,
     account_id,
@@ -467,7 +516,9 @@ def build_hour(
             item.get("actions")
         )
 
-        row = base_row("hour")
+        row = base_row(
+            "hour"
+        )
 
         raw_hour = item.get(
             "hourly_stats_aggregated_by_advertiser_time_zone"
@@ -486,6 +537,10 @@ def build_hour(
 
     return result
 
+
+# ==========================================
+# ad
+# ==========================================
 
 def build_ad(
     token,
@@ -514,16 +569,20 @@ def build_ad(
             item.get("actions")
         )
 
-        row = base_row("ad")
+        row = base_row(
+            "ad"
+        )
 
         row["campaign_name"] = item.get(
             "campaign_name",
             ""
         )
+
         row["adset_name"] = item.get(
             "adset_name",
             ""
         )
+
         row["ad_name"] = item.get(
             "ad_name",
             ""
@@ -538,6 +597,10 @@ def build_ad(
 
     return result
 
+
+# ==========================================
+# campaign_gen
+# ==========================================
 
 def build_campaign_gender(
     token,
@@ -567,7 +630,9 @@ def build_campaign_gender(
             item.get("actions")
         )
 
-        row = base_row("campaign_gen")
+        row = base_row(
+            "campaign_gen"
+        )
 
         row["campaign_name"] = item.get(
             "campaign_name",
@@ -587,6 +652,10 @@ def build_campaign_gender(
 
     return result
 
+
+# ==========================================
+# campaign_age
+# ==========================================
 
 def build_campaign_age(
     token,
@@ -616,7 +685,9 @@ def build_campaign_age(
             item.get("actions")
         )
 
-        row = base_row("campaign_age")
+        row = base_row(
+            "campaign_age"
+        )
 
         row["campaign_name"] = item.get(
             "campaign_name",
@@ -637,6 +708,10 @@ def build_campaign_age(
 
     return result
 
+
+# ==========================================
+# campaign_pf
+# ==========================================
 
 def build_campaign_platform(
     token,
@@ -666,7 +741,9 @@ def build_campaign_platform(
             item.get("actions")
         )
 
-        row = base_row("campaign_pf")
+        row = base_row(
+            "campaign_pf"
+        )
 
         row["campaign_name"] = item.get(
             "campaign_name",
@@ -715,7 +792,11 @@ def open_sheet(config):
     )
 
     spreadsheet = gc.open_by_key(
-        config["sheets"]["spreadsheet_id"]
+        config[
+            "sheets"
+        ][
+            "spreadsheet_id"
+        ]
     )
 
     try:
@@ -750,6 +831,7 @@ def write_sheet(
         value_input_option="RAW",
     )
 
+    # month / day を日付表示
     worksheet.format(
         "C:D",
         {
@@ -760,6 +842,7 @@ def write_sheet(
         }
     )
 
+    # hourを整数表示
     worksheet.format(
         "E:E",
         {
@@ -802,12 +885,24 @@ def main():
         f"～ {until.isoformat()}"
     )
 
-    token = config["meta"]["token"]
-    account_id = config["meta"]["account_id"]
+    token = config[
+        "meta"
+    ][
+        "token"
+    ]
+
+    account_id = config[
+        "meta"
+    ][
+        "account_id"
+    ]
 
     rows = []
 
-    print("campaign_month 取得中...")
+    print(
+        "campaign_month 取得中..."
+    )
+
     rows.extend(
         build_campaign_month(
             token,
@@ -817,7 +912,10 @@ def main():
         )
     )
 
-    print("campaign_day 取得中...")
+    print(
+        "campaign_day 取得中..."
+    )
+
     rows.extend(
         build_campaign_day(
             token,
@@ -827,7 +925,10 @@ def main():
         )
     )
 
-    print("hour 取得中...")
+    print(
+        "hour 取得中..."
+    )
+
     rows.extend(
         build_hour(
             token,
@@ -837,7 +938,10 @@ def main():
         )
     )
 
-    print("ad 取得中...")
+    print(
+        "ad 取得中..."
+    )
+
     rows.extend(
         build_ad(
             token,
@@ -847,7 +951,10 @@ def main():
         )
     )
 
-    print("campaign_gen 取得中...")
+    print(
+        "campaign_gen 取得中..."
+    )
+
     rows.extend(
         build_campaign_gender(
             token,
@@ -857,7 +964,10 @@ def main():
         )
     )
 
-    print("campaign_age 取得中...")
+    print(
+        "campaign_age 取得中..."
+    )
+
     rows.extend(
         build_campaign_age(
             token,
@@ -867,7 +977,10 @@ def main():
         )
     )
 
-    print("campaign_pf 取得中...")
+    print(
+        "campaign_pf 取得中..."
+    )
+
     rows.extend(
         build_campaign_platform(
             token,
@@ -904,4 +1017,5 @@ if __name__ == "__main__":
             f"ERROR: {e}",
             file=sys.stderr
         )
+
         raise

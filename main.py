@@ -1,4 +1,11 @@
+import hashlib
 import json
+import logging
+import math
+import secrets
+import time
+import uuid
+from urllib.parse import parse_qs, urlsplit
 import os
 import re
 import sys
@@ -14,7 +21,7 @@ from google.oauth2.service_account import Credentials
 # 基本設定
 # ==========================================
 
-API_VERSION = "v26.0"
+API_VERSION = "v27.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{API_VERSION}"
 
 SHEET_NAME = "gitreport"
@@ -53,21 +60,24 @@ PURCHASE_ACTION_TYPES = [
 # 設定読み込み
 # ==========================================
 
+class ExportError(Exception):
+    """A redacted message suitable for the Actions log."""
+
+
 def load_config():
     raw = os.environ.get("APP_SECRET_JSON")
 
     if not raw:
-        raise RuntimeError(
+        raise ExportError(
             "GitHub Secrets の APP_SECRET_JSON が設定されていません。"
         )
 
     try:
         return json.loads(raw)
 
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"APP_SECRET_JSON のJSON形式が正しくありません: {e}"
-        )
+    except json.JSONDecodeError:
+        raise ExportError("APP_SECRET_JSON のJSON形式が正しくありません。") from None
+
 
 
 # ==========================================
@@ -101,44 +111,56 @@ def get_report_period():
 def normalize_account_id(account_id):
     account_id = str(account_id).strip()
 
-    if account_id.startswith("act_"):
-        return account_id
+    digits = account_id.removeprefix("act_")
+    if not re.fullmatch(r"[0-9]+", digits):
+        raise ExportError("Invalid Meta account ID.")
+    return f"act_{digits}"
 
-    return f"act_{account_id}"
+
+def meta_page(url, token, params):
+    try:
+        response = requests.get(url, params=params, timeout=120, allow_redirects=False,
+                                headers={"Authorization": f"Bearer {token}"})
+    except requests.RequestException:
+        raise ExportError("Meta API connection failed.") from None
+    status = response.status_code
+    try:
+        data = response.json()
+    except ValueError:
+        raise ExportError(f"Meta API invalid JSON (HTTP {status}).") from None
+    has_error = isinstance(data, dict) and "error" in data
+    if not 200 <= status < 300 or has_error:
+        error = data.get("error") if has_error else None
+        details = ""
+        if isinstance(error, dict):
+            for key in ("code", "error_subcode"):
+                if type(error.get(key)) is int:
+                    details += f", {key}={error[key]}"
+        raise ExportError(f"Meta API failed (HTTP {status}{details}).")
+    return data
 
 
-def meta_get_all(url, params):
-    rows = []
-
-    while url:
-        response = requests.get(
-            url,
-            params=params,
-            timeout=120
-        )
-
-        if not response.ok:
-            raise RuntimeError(
-                f"Meta APIエラー\n"
-                f"status={response.status_code}\n"
-                f"response={response.text}"
-            )
-
-        payload = response.json()
-
-        rows.extend(
-            payload.get("data", [])
-        )
-
-        url = (
-            payload
-            .get("paging", {})
-            .get("next")
-        )
-
-        params = None
-
-    return rows
+def next_cursor(data, endpoint):
+    paging = data.get("paging", {})
+    if not isinstance(paging, dict):
+        raise ExportError("Meta returned invalid paging.")
+    if "next" not in paging:
+        return None
+    link = paging["next"]
+    if not isinstance(link, str):
+        raise ExportError("Meta returned an invalid next page.")
+    parts = urlsplit(link)
+    if (parts.scheme != "https" or parts.netloc != "graph.facebook.com"
+            or parts.path != urlsplit(endpoint).path or parts.fragment):
+        raise ExportError("Meta returned an unexpected next page.")
+    query = parse_qs(parts.query, keep_blank_values=True)
+    after = query.get("after", [])
+    if len(after) != 1 or not after[0] or any(k in query for k in ("before", "offset", "__paging_token")):
+        raise ExportError("Meta returned unsupported pagination.")
+    cursors = paging.get("cursors", {})
+    if not isinstance(cursors, dict) or cursors.get("after", after[0]) != after[0]:
+        raise ExportError("Meta returned inconsistent cursors.")
+    return after[0]
 
 
 def fetch_insights(
@@ -161,7 +183,6 @@ def fetch_insights(
     )
 
     params = {
-        "access_token": token,
         "level": level,
         "fields": ",".join(fields),
         "time_range": json.dumps({
@@ -184,10 +205,40 @@ def fetch_insights(
     if time_increment is not None:
         params["time_increment"] = time_increment
 
-    return meta_get_all(
-        url,
-        params
-    )
+    rows = []
+    seen = set()
+    while True:
+        payload = meta_page(url, token, params)
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ExportError("Meta returned an invalid data array.")
+        for row in payload["data"]:
+            if not isinstance(row, dict):
+                raise ExportError("Meta returned an invalid row.")
+            for field in [*fields, *(breakdowns or [])]:
+                if field == "hourly_stats_aggregated_by_advertiser_time_zone":
+                    parse_hour(row.get(field))
+                    continue
+                if field != "actions" and not isinstance(row.get(field), str):
+                    raise ExportError("Meta returned an invalid report dimension.")
+                if field in (breakdowns or []) and not row[field].strip():
+                    raise ExportError("Meta returned an empty breakdown.")
+            if time_increment is not None:
+                try:
+                    day = date.fromisoformat(row["date_start"])
+                    if not since <= day <= until or row["date_start"] != day.isoformat():
+                        raise ValueError
+                except (TypeError, KeyError, ValueError):
+                    raise ExportError("Meta returned an invalid date.") from None
+            if "actions" in row and not isinstance(row["actions"], list):
+                raise ExportError("Meta returned an invalid actions array.")
+        rows.extend(payload["data"])
+        after = next_cursor(payload, url)
+        if after is None:
+            return rows
+        if after in seen:
+            raise ExportError("Meta pagination repeated a cursor.")
+        seen.add(after)
+        params["after"] = after
 
 
 # ==========================================
@@ -195,30 +246,30 @@ def fetch_insights(
 # ==========================================
 
 def to_number(value):
-    if value in (None, ""):
-        return 0
-
     try:
+        if isinstance(value, bool):
+            raise ValueError
         num = float(value)
-
-        if num.is_integer():
-            return int(num)
-
-        return num
-
-    except (TypeError, ValueError):
-        return 0
+        if not math.isfinite(num) or num < 0:
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
+        raise ExportError("Meta returned an invalid purchase count.") from None
+    return int(num) if num.is_integer() else num
 
 
 def get_purchase_cv(actions):
     if not actions:
         return 0, 0
 
-    action_map = {
-        item.get("action_type"): item
-        for item in actions
-        if item.get("action_type")
-    }
+    action_map = {}
+    for item in actions:
+        if not isinstance(item, dict) or not isinstance(item.get("action_type"), str) or not item["action_type"]:
+            raise ExportError("Meta returned an invalid action.")
+        action_type = item["action_type"]
+        if action_type in PURCHASE_ACTION_TYPES:
+            if action_type in action_map:
+                raise ExportError("Meta returned duplicate purchase actions.")
+            action_map[action_type] = item
 
     selected = None
 
@@ -231,6 +282,9 @@ def get_purchase_cv(actions):
 
     if selected is None:
         return 0, 0
+
+    if "1d_view" not in selected and "7d_click" not in selected:
+        raise ExportError("Meta returned a purchase action without the requested windows.")
 
     view_1d = to_number(
         selected.get(
@@ -267,33 +321,14 @@ def translate_gender(value):
 
 
 def parse_hour(value):
-    if value is None:
-        return ""
-
-    text = str(value)
-
-    match = re.match(
-        r"^\s*(\d{1,2}):",
-        text
-    )
-
-    if match:
-        return int(
-            match.group(1)
-        )
-
-    try:
-        hour = int(text)
-
-        if 0 <= hour <= 23:
-            return hour
-
-    except ValueError:
-        pass
-
-    raise ValueError(
-        f"hourの形式を判定できません: {value}"
-    )
+    text = str(value).strip()
+    hour_pattern = r"(?:[01]?[0-9]|2[0-3])"
+    clock = hour_pattern + r":[0-5][0-9](?::[0-5][0-9])?"
+    if re.fullmatch(hour_pattern, text):
+        return int(text)
+    if re.fullmatch(rf"{clock}(?:\s*-\s*{clock})?", text):
+        return int(text.split(":", 1)[0])
+    raise ExportError("Meta returned an invalid hourly breakdown.")
 
 
 def first_day_of_month(date_string):
@@ -799,63 +834,166 @@ def open_sheet(config):
         ]
     )
 
+    return spreadsheet
+
+
+LEASE_SECONDS = 3600
+
+
+def sheet_state(book):
+    return book.fetch_sheet_metadata(params={
+        "fields": "sheets(properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount))),"
+                  "namedRanges(namedRangeId,name)"
+    })
+
+
+def range_names(state):
+    return {item["name"]: item["namedRangeId"] for item in state.get("namedRanges", [])}
+
+
+def delete_range(range_id):
+    return {"deleteNamedRange": {"namedRangeId": range_id}}
+
+
+def add_range(name, range_id, sheet_id):
+    return {"addNamedRange": {"namedRange": {
+        "name": name, "namedRangeId": range_id,
+        "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1,
+                  "startColumnIndex": 0, "endColumnIndex": 1},
+    }}}
+
+
+def lease_time(range_id):
+    match = re.fullmatch(r"purchase_cv_([0-9]+)_[0-9a-f]{32}", range_id)
+    if not match:
+        raise ExportError("Unexpected Sheets lock. Check named ranges.")
+    return int(match.group(1))
+
+
+def acquire_lease(book, title):
+    # All runners compete for one unique name. Each acquisition uses a fresh ID.
+    key = hashlib.sha256(title.casefold().encode()).hexdigest()[:24]
+    lock = "purchase_cv_lock_" + key
+    state = sheet_state(book)
+    existing = range_names(state).get(lock)
+    now = int(time.time())
+    if existing and now < lease_time(existing) + LEASE_SECONDS:
+        return None
+    token = f"purchase_cv_{now}_{uuid.uuid4().hex}"
+    anchor = next(s["properties"]["sheetId"] for s in state["sheets"]
+                  if s["properties"].get("sheetType", "GRID") == "GRID")
+    lease = {"id": token, "name": lock, "receipt_prefix": "purchase_cv_done_" + key + "_",
+             "anchor": anchor}
+    ops = [delete_range(existing)] if existing else []
+    ops.append(add_range(lock, token, anchor))
     try:
-        worksheet = spreadsheet.worksheet(
-            SHEET_NAME
-        )
-
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=SHEET_NAME,
-            rows=1000,
-            cols=len(HEADERS),
-        )
-
-    return worksheet
+        book.batch_update({"requests": ops})
+    except Exception:
+        owner = range_names(sheet_state(book)).get(lock)
+        if owner == token:
+            return lease
+        if owner and owner != existing:
+            return None
+        raise ExportError("Sheets lock acquisition failed.") from None
+    return lease
 
 
-def write_sheet(
-    worksheet,
-    rows
-):
-    worksheet.clear()
+def release_lease(book, lease):
+    # IDs are never reused. A delayed cleanup cannot unlock the successor.
+    try:
+        if range_names(sheet_state(book)).get(lease["name"]) == lease["id"]:
+            book.batch_update({"requests": [delete_range(lease["id"])]})
+    except Exception:
+        print("Sheets lock cleanup unconfirmed. Expiry permits recovery.", file=sys.stderr)
 
-    all_values = [
-        HEADERS,
-        *rows
-    ]
 
-    worksheet.update(
-        range_name="A1",
-        values=all_values,
-        value_input_option="RAW",
-    )
+def previous_report_height(book, title, new_height):
+    escaped = title.replace("'", "''")
+    result = book.values_get(f"'{escaped}'!A:M", params={"valueRenderOption": "FORMULA"})
+    values = result.get("values", [])
+    height = 0
+    if values and values[0] == HEADERS:
+        height = 1
+        for row in values[1:]:
+            if len(row) < 3 or row[0] != MEDIA_NAME:
+                break
+            if row[1] not in {"campaign_month", "campaign_day", "hour", "ad", "campaign_gen", "campaign_age", "campaign_pf"}:
+                break
+            height += 1
+    if any(any(cell != "" for cell in row) for row in values[height:new_height]):
+        raise ExportError("Sheets output overlaps existing non-report data.")
+    return height
 
-    # month / day を日付表示
-    worksheet.format(
-        "C:D",
-        {
-            "numberFormat": {
-                "type": "DATE",
-                "pattern": "yyyy-mm-dd",
-            }
-        }
-    )
 
-    # hourを整数表示
-    worksheet.format(
-        "E:E",
-        {
-            "numberFormat": {
-                "type": "NUMBER",
-                "pattern": "0",
-            }
-        }
-    )
+def write_to_sheet(book, title, rows, lease):
+    state = sheet_state(book)
+    names = range_names(state)
+    if names.get(lease["name"]) != lease["id"]:
+        raise ExportError("Sheets lock ownership changed.")
+    # A missing owner ID invalidates this *whole* batch even after the preliminary read.
+    receipt_id = "receipt_" + lease["id"]
+    receipt = lease["receipt_prefix"] + lease["id"]
+    ops = [{"updateNamedRange": {"namedRange": {"namedRangeId": lease["id"], "name": receipt},
+                                 "fields": "name"}},
+           delete_range(lease["id"]), add_range(receipt, receipt_id, lease["anchor"])]
+    # Keep receipts long enough for a timed-out writer to confirm its own commit.
+    cutoff = int(time.time()) - 86400
+    for name, range_id in names.items():
+        saved_token = range_id.removeprefix("receipt_")
+        if name == lease["receipt_prefix"] + saved_token and lease_time(saved_token) < cutoff:
+            ops.append(delete_range(range_id))
+    props = next((s["properties"] for s in state["sheets"]
+                  if s["properties"]["title"] == title), None)
+    output = [HEADERS, *rows]
+    if props is None:
+        sheet_id = secrets.randbelow(2**31 - 1) + 1
+        height = len(output)
+        ops.append({"addSheet": {"properties": {
+            "sheetId": sheet_id, "title": title,
+            "gridProperties": {"rowCount": max(1000, height), "columnCount": len(HEADERS)},
+        }}})
+    else:
+        sheet_id = props["sheetId"]
+        grid = props["gridProperties"]
+        height = max(len(output), previous_report_height(book, title, len(output)))
+        for dimension, current, needed in (("ROWS", grid["rowCount"], height),
+                                            ("COLUMNS", grid["columnCount"], len(HEADERS))):
+            if needed > current:
+                ops.append({"appendDimension": {"sheetId": sheet_id, "dimension": dimension,
+                                                "length": needed - current}})
+    # updateCells with an explicit range clears only surplus values in the old report.
+    cell_rows = []
+    for row in output:
+        cells = []
+        for value in row:
+            field = "numberValue" if isinstance(value, (int, float)) else "stringValue"
+            cells.append({"userEnteredValue": {field: value}})
+        cell_rows.append({"values": cells})
+    ops.append({"updateCells": {
+        "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": height,
+                  "startColumnIndex": 0, "endColumnIndex": len(HEADERS)},
+        "rows": cell_rows, "fields": "userEnteredValue",
+    }})
+    for start_col, end_col, fmt, pattern in ((2, 4, "DATE", "yyyy-mm-dd"), (4, 5, "NUMBER", "0")):
+        ops.append({"repeatCell": {
+            "range": {"sheetId": sheet_id, "startColumnIndex": start_col, "endColumnIndex": end_col},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": fmt, "pattern": pattern}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }})
+    ops.append({"updateSheetProperties": {
+        "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+        "fields": "gridProperties.frozenRowCount",
+    }})
+    try:
+        book.batch_update({"requests": ops})
+    except Exception:
+        try:
+            confirmed = range_names(sheet_state(book)).get(receipt) == receipt_id
+        except Exception:
+            raise ExportError("Sheets commit could not be confirmed.") from None
+        if not confirmed:
+            raise ExportError("Sheets commit was not confirmed.") from None
 
-    worksheet.freeze(
-        rows=1
-    )
 
 
 # ==========================================
@@ -897,6 +1035,23 @@ def main():
         "account_id"
     ]
 
+    if not isinstance(token, str) or not token.strip():
+        raise ExportError("Meta token is missing.")
+    book = open_sheet(config)
+    lease = acquire_lease(book, SHEET_NAME)
+    if lease is None:
+        print("他の実行が処理中のためスキップします。")
+        return
+    try:
+        rows = collect_rows(token, account_id, since, until)
+        write_to_sheet(book, SHEET_NAME, rows, lease)
+    except BaseException:
+        release_lease(book, lease)
+        raise
+    print(f"gitreportへの出力が完了しました。出力行数: {len(rows)}")
+
+
+def collect_rows(token, account_id, since, until):
     rows = []
 
     print(
@@ -990,32 +1145,14 @@ def main():
         )
     )
 
-    print(
-        f"出力行数: {len(rows)}"
-    )
-
-    worksheet = open_sheet(
-        config
-    )
-
-    write_sheet(
-        worksheet,
-        rows
-    )
-
-    print(
-        "gitreportへの出力が完了しました。"
-    )
+    return rows
 
 
 if __name__ == "__main__":
+    logging.disable(logging.CRITICAL)
     try:
         main()
-
-    except Exception as e:
-        print(
-            f"ERROR: {e}",
-            file=sys.stderr
-        )
-
-        raise
+    except ExportError as exc:
+        sys.exit(str(exc))
+    except Exception:
+        sys.exit("Export failed: unexpected configuration, service, or response error.")

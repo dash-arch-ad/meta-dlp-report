@@ -134,7 +134,7 @@ def meta_page(url, token, params):
         details = ""
         if isinstance(error, dict):
             for key in ("code", "error_subcode"):
-                if type(error.get(key)) is int:
+                if type(error.get(key)) is int and 0 <= error[key] <= 2_147_483_647:
                     details += f", {key}={error[key]}"
         raise ExportError(f"Meta API failed (HTTP {status}{details}).")
     return data
@@ -235,8 +235,8 @@ def fetch_insights(
         after = next_cursor(payload, url)
         if after is None:
             return rows
-        if after in seen:
-            raise ExportError("Meta pagination repeated a cursor.")
+        if token in after or after in seen:
+            raise ExportError("Meta returned invalid or repeated pagination cursor.")
         seen.add(after)
         params["after"] = after
 
@@ -898,13 +898,13 @@ def acquire_lease(book, title):
     return lease
 
 
-def release_lease(book, lease):
+def release_lease(book, lease, report=print):
     # IDs are never reused. A delayed cleanup cannot unlock the successor.
     try:
         if range_names(sheet_state(book)).get(lease["name"]) == lease["id"]:
             book.batch_update({"requests": [delete_range(lease["id"])]})
     except Exception:
-        print("Sheets lock cleanup unconfirmed. Expiry permits recovery.", file=sys.stderr)
+        report("Sheets lock cleanup unconfirmed. Expiry permits recovery.")
 
 
 def previous_report_height(book, title, new_height):
@@ -1000,24 +1000,24 @@ def write_to_sheet(book, title, rows, lease):
 # Main
 # ==========================================
 
-def main():
+def main(report=print):
     config = load_config()
 
     since, until = get_report_period()
 
     if since is None or until is None:
-        print(
+        report(
             "取得対象期間外のため処理を終了します。"
         )
         return
 
     if until < since:
-        print(
+        report(
             "取得対象データがないため処理を終了します。"
         )
         return
 
-    print(
+    report(
         f"取得期間: "
         f"{since.isoformat()} "
         f"～ {until.isoformat()}"
@@ -1040,21 +1040,21 @@ def main():
     book = open_sheet(config)
     lease = acquire_lease(book, SHEET_NAME)
     if lease is None:
-        print("他の実行が処理中のためスキップします。")
+        report("他の実行が処理中のためスキップします。")
         return
     try:
-        rows = collect_rows(token, account_id, since, until)
+        rows = collect_rows(token, account_id, since, until, report)
         write_to_sheet(book, SHEET_NAME, rows, lease)
     except BaseException:
-        release_lease(book, lease)
+        release_lease(book, lease, report)
         raise
-    print(f"gitreportへの出力が完了しました。出力行数: {len(rows)}")
+    report(f"gitreportへの出力が完了しました。出力行数: {len(rows)}")
 
 
-def collect_rows(token, account_id, since, until):
+def collect_rows(token, account_id, since, until, report=print):
     rows = []
 
-    print(
+    report(
         "campaign_month 取得中..."
     )
 
@@ -1067,7 +1067,7 @@ def collect_rows(token, account_id, since, until):
         )
     )
 
-    print(
+    report(
         "campaign_day 取得中..."
     )
 
@@ -1080,7 +1080,7 @@ def collect_rows(token, account_id, since, until):
         )
     )
 
-    print(
+    report(
         "hour 取得中..."
     )
 
@@ -1093,7 +1093,7 @@ def collect_rows(token, account_id, since, until):
         )
     )
 
-    print(
+    report(
         "ad 取得中..."
     )
 
@@ -1106,7 +1106,7 @@ def collect_rows(token, account_id, since, until):
         )
     )
 
-    print(
+    report(
         "campaign_gen 取得中..."
     )
 
@@ -1119,7 +1119,7 @@ def collect_rows(token, account_id, since, until):
         )
     )
 
-    print(
+    report(
         "campaign_age 取得中..."
     )
 
@@ -1132,7 +1132,7 @@ def collect_rows(token, account_id, since, until):
         )
     )
 
-    print(
+    report(
         "campaign_pf 取得中..."
     )
 
@@ -1148,11 +1148,31 @@ def collect_rows(token, account_id, since, until):
     return rows
 
 
+def run_cli():
+    # 参考コードと同様、安全な診断ログだけを Actions に出力する。
+    with os.fdopen(os.dup(2), "w", buffering=1) as diagnostics:
+        with open(os.devnull, "w") as sink:
+            os.dup2(sink.fileno(), 1)
+            os.dup2(sink.fileno(), 2)
+
+        logging.disable(logging.CRITICAL)
+
+        def report(message):
+            print(message, file=diagnostics, flush=True)
+
+        try:
+            main(report)
+        except ExportError as error:
+            report(str(error))
+            return 1
+        except KeyboardInterrupt:
+            report("Export interrupted.")
+            return 130
+        except BaseException:
+            report("Export failed: unexpected configuration, service, or response error.")
+            return 1
+    return 0
+
+
 if __name__ == "__main__":
-    logging.disable(logging.CRITICAL)
-    try:
-        main()
-    except ExportError as exc:
-        sys.exit(str(exc))
-    except Exception:
-        sys.exit("Export failed: unexpected configuration, service, or response error.")
+    sys.exit(run_cli())

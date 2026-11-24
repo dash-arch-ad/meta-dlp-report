@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import math
 import secrets
 import time
@@ -1148,16 +1147,15 @@ def collect_rows(token, account_id, since, until, report=print):
     return rows
 
 
-def run_cli():
-    # 参考コードと同様、安全な診断ログだけを Actions に出力する。
+def run_cli() -> int:
+    # Only report() can reach Actions. Suppress dependency logs, wire dumps,
+    # warnings and raw tracebacks, including direct writes to file descriptors.
     with os.fdopen(os.dup(2), "w", buffering=1) as diagnostics:
         with open(os.devnull, "w") as sink:
             os.dup2(sink.fileno(), 1)
             os.dup2(sink.fileno(), 2)
 
-        logging.disable(logging.CRITICAL)
-
-        def report(message):
+        def report(message: str) -> None:
             print(message, file=diagnostics, flush=True)
 
         try:
@@ -1165,11 +1163,8 @@ def run_cli():
         except ExportError as error:
             report(str(error))
             return 1
-        except KeyboardInterrupt:
-            report("Export interrupted.")
-            return 130
-        except BaseException:
-            report("Export failed: unexpected configuration, service, or response error.")
+        except Exception:
+            report("Export failed. See the last operation above.")
             return 1
     return 0
 

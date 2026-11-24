@@ -23,8 +23,6 @@ from google.oauth2.service_account import Credentials
 API_VERSION = "v27.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{API_VERSION}"
 
-SHEET_NAME = "gitreport"
-MEDIA_NAME = "Meta"
 
 REPORT_TIMEZONE = "Asia/Tokyo"
 
@@ -363,7 +361,7 @@ def spreadsheet_date_serial(d):
 
 def base_row(scope):
     return {
-        "media": MEDIA_NAME,
+        "media": "Meta",
         "scope": scope,
         "month": "",
         "day": "",
@@ -914,7 +912,7 @@ def previous_report_height(book, title, new_height):
     if values and values[0] == HEADERS:
         height = 1
         for row in values[1:]:
-            if len(row) < 3 or row[0] != MEDIA_NAME:
+            if len(row) < 3 or row[0] != "Meta":
                 break
             if row[1] not in {"campaign_month", "campaign_day", "hour", "ad", "campaign_gen", "campaign_age", "campaign_pf"}:
                 break
@@ -1037,13 +1035,13 @@ def main(report=print):
     if not isinstance(token, str) or not token.strip():
         raise ExportError("Meta token is missing.")
     book = open_sheet(config)
-    lease = acquire_lease(book, SHEET_NAME)
+    lease = acquire_lease(book, "gitreport")
     if lease is None:
         report("他の実行が処理中のためスキップします。")
         return
     try:
         rows = collect_rows(token, account_id, since, until, report)
-        write_to_sheet(book, SHEET_NAME, rows, lease)
+        write_to_sheet(book, "gitreport", rows, lease)
     except BaseException:
         release_lease(book, lease, report)
         raise
